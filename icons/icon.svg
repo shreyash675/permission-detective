@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="20" fill="#032d60"/>
+  <circle cx="52" cy="52" r="28" fill="none" stroke="#ffffff" stroke-width="8"/>
+  <line x1="72" y1="72" x2="102" y2="102" stroke="#ffffff" stroke-width="10" stroke-linecap="round"/>
+  <text x="52" y="60" font-family="Arial, sans-serif" font-size="26" font-weight="bold"
+        fill="#ffffff" text-anchor="middle" dominant-baseline="middle">PD</text>
+</svg>

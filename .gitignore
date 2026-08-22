@@ -1,0 +1,10 @@
+# Build output
+dist/
+*.zip
+
+# Dependencies (only present if esbuild/terser installed for better minification)
+node_modules/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db

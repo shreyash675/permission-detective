@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Permission Detective — Grant Access</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        max-width: 640px;
+        margin: 48px auto;
+        padding: 0 24px;
+        color: #3e3e3c;
+        line-height: 1.6;
+      }
+      h1 {
+        font-size: 20px;
+        color: #032d60;
+      }
+      code {
+        background: #f3f3f3;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-size: 13px;
+      }
+      button {
+        background: #0176d3;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        padding: 12px 20px;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+        margin-top: 8px;
+      }
+      button:hover {
+        background: #014486;
+      }
+      #status {
+        margin-top: 20px;
+        padding: 12px 16px;
+        border-radius: 4px;
+        display: none;
+      }
+      .ok {
+        background: #cceeda;
+        color: #2e844a;
+        border: 1px solid #2e844a;
+      }
+      .err {
+        background: #fedede;
+        color: #ba0517;
+        border: 1px solid #ba0517;
+      }
+      ul {
+        background: #fafaf9;
+        border: 1px solid #dddbda;
+        border-radius: 4px;
+        padding: 12px 12px 12px 32px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🔍 Permission Detective needs access to your Salesforce API domain</h1>
+
+    <p>
+      Salesforce serves the Lightning UI from
+      <code>*.lightning.force.com</code>, but the REST API — and the session
+      that authenticates it — lives on <code>*.my.salesforce.com</code>.
+      Permission Detective needs read access to that domain's session cookie to
+      analyze permissions.
+    </p>
+
+    <p>
+      Your browser currently only grants access to the Lightning domain. Because
+      you never actually browse to the API domain, the browser never offers to
+      grant it — so it has to be granted here.
+    </p>
+
+    <ul>
+      <li><code>https://*.my.salesforce.com/*</code></li>
+      <li><code>https://*.salesforce.com/*</code></li>
+      <li><code>https://*.lightning.force.com/*</code></li>
+    </ul>
+
+    <button id="grant">Grant access</button>
+
+    <div id="status"></div>
+
+    <script src="grant-access.js"></script>
+  </body>
+</html>
