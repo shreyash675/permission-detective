@@ -5,14 +5,32 @@
   "description": "Instantly debug why a user can or cannot see/edit any field on any Salesforce record",
   "permissions": ["activeTab", "cookies", "storage", "scripting"],
   "host_permissions": [
-    "https://*.lightning.force.com/*",
-    "https://*.my.salesforce.com/*",
-    "https://*.salesforce.com/*"
+    "https://*.salesforce.com/*",
+    "https://*.force.com/*",
+    "https://*.visualforce.com/*",
+    "https://*.cloudforce.com/*",
+    "https://*.salesforce-setup.com/*",
+    "https://*.salesforce.mil/*",
+    "https://*.force.mil/*",
+    "https://*.visualforce.mil/*",
+    "https://*.cloudforce.mil/*",
+    "https://*.crmforce.mil/*",
+    "https://*.sfcrmapps.cn/*",
+    "https://*.sfcrmproducts.cn/*"
   ],
   "optional_host_permissions": [
-    "https://*.lightning.force.com/*",
-    "https://*.my.salesforce.com/*",
-    "https://*.salesforce.com/*"
+    "https://*.salesforce.com/*",
+    "https://*.force.com/*",
+    "https://*.visualforce.com/*",
+    "https://*.cloudforce.com/*",
+    "https://*.salesforce-setup.com/*",
+    "https://*.salesforce.mil/*",
+    "https://*.force.mil/*",
+    "https://*.visualforce.mil/*",
+    "https://*.cloudforce.mil/*",
+    "https://*.crmforce.mil/*",
+    "https://*.sfcrmapps.cn/*",
+    "https://*.sfcrmproducts.cn/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -20,8 +38,18 @@
   "content_scripts": [
     {
       "matches": [
-        "https://*.lightning.force.com/*",
-        "https://*.my.salesforce.com/*"
+        "https://*.salesforce.com/*",
+        "https://*.force.com/*",
+        "https://*.visualforce.com/*",
+        "https://*.cloudforce.com/*",
+        "https://*.salesforce-setup.com/*",
+        "https://*.salesforce.mil/*",
+        "https://*.force.mil/*",
+        "https://*.visualforce.mil/*",
+        "https://*.cloudforce.mil/*",
+        "https://*.crmforce.mil/*",
+        "https://*.sfcrmapps.cn/*",
+        "https://*.sfcrmproducts.cn/*"
       ],
       "js": ["overlay.js", "content.js"],
       "css": ["overlay.css"],

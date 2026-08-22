@@ -394,6 +394,25 @@ function buildSummaryCard(data) {
   return card;
 }
 
+/**
+ * Renders the sharing-attribution debug counts inline in the "nothing
+ * found" messages, so a surprising result (e.g. a known sharing rule not
+ * showing up) is diagnosable directly in the panel — no service worker
+ * console needed.
+ */
+function pdSharingDebugSuffix(debug) {
+  if (!debug) return '';
+  const parts = [
+    `checked ${debug.idsChecked} id(s) against ${debug.shareTable}`,
+    `${debug.memberRowCount} group(s) via GroupMember`,
+    `org-wide (AllInternalUsers) group ${debug.orgWideRowCount > 0 ? 'found' : 'NOT found'}`
+  ];
+  if (debug.memberError) parts.push(`GroupMember lookup error: ${debug.memberError}`);
+  if (debug.orgWideError) parts.push(`org-wide group lookup error: ${debug.orgWideError}`);
+  if (debug.shareQueryError) parts.push(`${debug.shareTable} query error: ${debug.shareQueryError}`);
+  return ` (${parts.join('; ')})`;
+}
+
 function buildRecordAccessSection(data) {
   const section = createSection('🔐 Record-Level Access');
   const { hasRead, hasEdit, hasDelete, hasTransfer } = data.recordAccess;
@@ -421,7 +440,7 @@ function buildRecordAccessSection(data) {
   } else if (hasRead) {
     section.appendChild(
       pdWarningBox(
-        'No explicit sharing rows found for this user (checked their direct assignment and every group/role they belong to) — access is most likely coming from Organization-Wide Defaults (Public Read Only/Read Write) rather than an explicit grant.',
+        `No explicit sharing rows found for this user (checked their direct assignment and every group/role they belong to) — access is most likely coming from Organization-Wide Defaults (Public Read Only/Read Write) rather than an explicit grant.${pdSharingDebugSuffix(data.sharingDebug)}`,
         'info'
       )
     );
@@ -430,7 +449,7 @@ function buildRecordAccessSection(data) {
   if (!hasRead) {
     const cause = sharingReasons.length
       ? `Found sharing row(s) — ${sharingReasons.map((r) => r.causeLabel).join(', ')} — but they don't grant enough access; check the Access Level(s) above against what's needed.`
-      : "No sharing rows grant this user access — likely blocked by Organization-Wide Defaults, with no compensating sharing rule, manual share, team membership, or role hierarchy grant.";
+      : `No sharing rows grant this user access — likely blocked by Organization-Wide Defaults, with no compensating sharing rule, manual share, team membership, or role hierarchy grant.${pdSharingDebugSuffix(data.sharingDebug)}`;
     section.appendChild(pdWarningBox(`This user cannot see this record. ${cause}`, 'error'));
   }
 

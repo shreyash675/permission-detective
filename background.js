@@ -241,23 +241,79 @@ function getShareTableName(objectApiName) {
 }
 
 /**
+ * Resolves the access-level field name on a Share table — inconsistent
+ * between standard and custom objects. Standard objects (AccountShare,
+ * OpportunityShare, CaseShare, etc.) name it per-object: "AccountAccessLevel",
+ * "OpportunityAccessLevel", etc. Only custom object Share tables
+ * (MyObject__Share) use the generic "AccessLevel" name.
+ */
+function getAccessLevelFieldName(objectApiName) {
+  if (objectApiName.endsWith('__c')) {
+    return 'AccessLevel';
+  }
+  return `${objectApiName}AccessLevel`;
+}
+
+/**
+ * Resolves the parent-record foreign key field on a Share table — same
+ * standard-vs-custom inconsistency as the access-level field. Custom object
+ * Share tables use the generic "ParentId". Standard objects instead use a
+ * per-object name: AccountShare uses "AccountId", OpportunityShare uses
+ * "OpportunityId", CaseShare uses "CaseId", etc. — "ParentId" doesn't exist
+ * on them at all.
+ */
+function getParentIdFieldName(objectApiName) {
+  if (objectApiName.endsWith('__c')) {
+    return 'ParentId';
+  }
+  return `${objectApiName}Id`;
+}
+
+/**
  * Finds every Public Group / Queue / Role / Role-and-Subordinates the user
  * is a member of — most real record-level sharing grants apply through role
  * hierarchy or public group membership, not a direct manual share row keyed
  * on the user's own Id, so attribution needs this to be complete.
  */
 async function getUserGroupIds(instanceUrl, sessionId, userId) {
+  const groupIds = [];
+  const debug = { memberRowCount: 0, memberError: null, orgWideRowCount: 0, orgWideError: null };
+
   try {
-    const result = await querySalesforce(
+    const memberResult = await querySalesforce(
       instanceUrl,
       sessionId,
       `SELECT GroupId FROM GroupMember WHERE UserOrGroupId = '${userId}'`
     );
-    return (result.records || []).map((r) => r.GroupId);
+    const rows = memberResult.records || [];
+    groupIds.push(...rows.map((r) => r.GroupId));
+    debug.memberRowCount = rows.length;
   } catch (err) {
-    console.warn(`[Permission Detective] getUserGroupIds failed for ${userId}`, err);
-    return [];
+    debug.memberError = err.message;
+    console.warn(`[Permission Detective] getUserGroupIds (GroupMember) failed for ${userId}`, err);
   }
+
+  // "AllInternalUsers" (Group.Type = 'Organization') grants membership to
+  // every internal user IMPLICITLY — Salesforce doesn't materialize a
+  // GroupMember row per user for it (would mean one row per user in the
+  // org), so a sharing rule targeting "All internal users" would otherwise
+  // be invisible to this lookup. Every internal user is a member, so it's
+  // included directly rather than relying on GroupMember to expose it.
+  try {
+    const orgWideResult = await querySalesforce(
+      instanceUrl,
+      sessionId,
+      `SELECT Id FROM Group WHERE Type = 'Organization'`
+    );
+    const rows = orgWideResult.records || [];
+    groupIds.push(...rows.map((r) => r.Id));
+    debug.orgWideRowCount = rows.length;
+  } catch (err) {
+    debug.orgWideError = err.message;
+    console.warn('[Permission Detective] org-wide (AllInternalUsers) group lookup failed', err);
+  }
+
+  return { groupIds, debug };
 }
 
 const ROW_CAUSE_LABELS = {
@@ -288,35 +344,59 @@ const ROW_CAUSE_LABELS = {
  * table (some standard objects don't expose one) rather than failing the
  * whole analysis over this attribution enhancement.
  *
- * @returns {Promise<Array<{ accessLevel: string, cause: string, causeLabel: string }>>}
+ * Returns diagnostic info alongside the result (id/group counts, which
+ * queries succeeded) so a "nothing found" result is directly explainable in
+ * the UI without needing the service worker console.
+ *
+ * @returns {Promise<{
+ *   reasons: Array<{ accessLevel: string, cause: string, causeLabel: string }>,
+ *   debug: { shareTable: string, idsChecked: number, memberRowCount: number, orgWideRowCount: number, shareQueryError: string|null, memberError: string|null, orgWideError: string|null }
+ * }>}
  */
 async function getSharingReasons(instanceUrl, sessionId, objectApiName, recordId, userId) {
   const shareTable = getShareTableName(objectApiName);
+  const accessLevelField = getAccessLevelFieldName(objectApiName);
+  const parentIdField = getParentIdFieldName(objectApiName);
+  const { groupIds, debug: groupDebug } = await getUserGroupIds(instanceUrl, sessionId, userId);
+  const idList = [userId, ...groupIds];
+  const ids = idList.map((id) => `'${id}'`).join(', ');
+
+  const debug = {
+    shareTable,
+    idsChecked: idList.length,
+    memberRowCount: groupDebug.memberRowCount,
+    orgWideRowCount: groupDebug.orgWideRowCount,
+    memberError: groupDebug.memberError,
+    orgWideError: groupDebug.orgWideError,
+    shareQueryError: null
+  };
+
   try {
-    const groupIds = await getUserGroupIds(instanceUrl, sessionId, userId);
-    const ids = [userId, ...groupIds].map((id) => `'${id}'`).join(', ');
     const result = await querySalesforce(
       instanceUrl,
       sessionId,
-      `SELECT UserOrGroupId, AccessLevel, RowCause FROM ${shareTable} WHERE ParentId = '${recordId}' AND UserOrGroupId IN (${ids})`
+      `SELECT UserOrGroupId, ${accessLevelField}, RowCause FROM ${shareTable} WHERE ${parentIdField} = '${recordId}' AND UserOrGroupId IN (${ids})`
     );
 
     const reasons = (result.records || []).map((r) => ({
-      accessLevel: r.AccessLevel,
+      accessLevel: r[accessLevelField],
       cause: r.RowCause,
       causeLabel: ROW_CAUSE_LABELS[r.RowCause] || `Apex Managed Sharing (${r.RowCause})`
     }));
 
     const seen = new Set();
-    return reasons.filter((r) => {
+    const deduped = reasons.filter((r) => {
       const key = `${r.cause}|${r.accessLevel}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
+
+    return { reasons: deduped, debug };
   } catch (err) {
+    debug.shareQueryError = err.message;
     console.warn(`[Permission Detective] getSharingReasons failed for ${shareTable}`, err);
-    return [];
+    return { reasons: [], debug };
   }
 }
 
@@ -488,7 +568,7 @@ async function analyzePermissions(instanceUrl, sessionId, userId, recordId, obje
     ? describeField(instanceUrl, sessionId, objectApiName, fieldApiName)
     : Promise.resolve({ permissionable: null });
 
-  const [recordAccessRes, fieldPermsRes, objectPermsRes, userAssignmentsRes, fieldMeta, sharingReasons] =
+  const [recordAccessRes, fieldPermsRes, objectPermsRes, userAssignmentsRes, fieldMeta, sharingResult] =
     await Promise.all([
       querySalesforce(instanceUrl, sessionId, userRecordAccessSoql),
       fieldPermsPromise,
@@ -497,6 +577,8 @@ async function analyzePermissions(instanceUrl, sessionId, userId, recordId, obje
       fieldMetaPromise,
       getSharingReasons(instanceUrl, sessionId, objectApiName, recordId, userId)
     ]);
+  const sharingReasons = sharingResult.reasons;
+  const sharingDebug = sharingResult.debug;
 
   const recordAccessRecord = recordAccessRes.records && recordAccessRes.records[0];
   const recordAccess = {
@@ -567,7 +649,7 @@ async function analyzePermissions(instanceUrl, sessionId, userId, recordId, obje
     (a) => `${a.name}|${a.type}|${a.profileName}`
   );
 
-  return { recordAccess, fls, objectCrud, userAssignments, fieldMeta, fieldChecked, sharingReasons };
+  return { recordAccess, fls, objectCrud, userAssignments, fieldMeta, fieldChecked, sharingReasons, sharingDebug };
 }
 
 /**
