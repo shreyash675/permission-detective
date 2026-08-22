@@ -62,8 +62,7 @@ responsible for it — in seconds, not tab-switches.
 **Shreyash Gaidhane**
 Salesforce Solution Consultant
 
-[LinkedIn](#) *(add your profile link)*
-
+https://www.linkedin.com/in/shreyash-g-3b4143253/
 ---
 
 ## Architecture
