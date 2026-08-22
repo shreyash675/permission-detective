@@ -174,20 +174,26 @@ function pdArrow() {
 function formatPermissionChain(data) {
   const hasAssignments = data.userAssignments && data.userAssignments.length > 0;
   const objectReadGranted = data.objectCrud.some((o) => o.read);
-  // A field with no FieldPermissions rows isn't necessarily denied — fields
-  // that aren't FLS-controllable (e.g. required standard fields like
-  // StageName) never have rows at all, and are always accessible. Only
-  // treat "no rows" as a block when the field is actually permissionable.
-  const flsApplies = !(data.fieldMeta && data.fieldMeta.permissionable === false);
-  const flsReadGranted = !flsApplies || data.fls.some((f) => f.read);
   const recordReadGranted = data.recordAccess.hasRead;
 
   const steps = [
     { title: 'Profile / Perm Sets', pass: hasAssignments },
-    { title: 'Object CRUD', pass: objectReadGranted },
-    { title: flsApplies ? 'Field-Level Security' : 'Field-Level Security (N/A)', pass: flsReadGranted },
-    { title: 'Record Access', pass: recordReadGranted }
+    { title: 'Object CRUD', pass: objectReadGranted }
   ];
+
+  // No field was specified — FLS genuinely wasn't checked, so it's omitted
+  // from the chain rather than shown as passing or blocking (it's neither).
+  if (data.fieldChecked !== false) {
+    // A field with no FieldPermissions rows isn't necessarily denied — fields
+    // that aren't FLS-controllable (e.g. required standard fields like
+    // StageName) never have rows at all, and are always accessible. Only
+    // treat "no rows" as a block when the field is actually permissionable.
+    const flsApplies = !(data.fieldMeta && data.fieldMeta.permissionable === false);
+    const flsReadGranted = !flsApplies || data.fls.some((f) => f.read);
+    steps.push({ title: flsApplies ? 'Field-Level Security' : 'Field-Level Security (N/A)', pass: flsReadGranted });
+  }
+
+  steps.push({ title: 'Record Access', pass: recordReadGranted });
 
   let blockedAt = null;
   let reached = true;
@@ -214,16 +220,39 @@ function formatPermissionChain(data) {
     container.appendChild(pdArrow());
   });
 
-  const resultStatus = blockedAt ? 'block' : 'pass';
-  container.appendChild(
-    pdChainNode(blockedAt ? 'ACCESS DENIED' : 'ACCESS GRANTED', resultStatus)
-  );
+  // The chain's steps trace READ access (whether the record/field is
+  // reachable at all). Whether EDIT is also fully granted is a separate
+  // question — factor it in for the final result so this never says
+  // "ACCESS GRANTED" when edit is actually restricted somewhere.
+  const { effectiveEdit } = computeEffectiveAccess(data);
+
+  let resultLabel;
+  let resultStatus;
+  if (blockedAt) {
+    resultLabel = 'ACCESS DENIED';
+    resultStatus = 'block';
+  } else if (!effectiveEdit) {
+    resultLabel = 'PARTIAL ACCESS';
+    resultStatus = 'conditional';
+  } else {
+    resultLabel = 'ACCESS GRANTED';
+    resultStatus = 'pass';
+  }
+
+  container.appendChild(pdChainNode(resultLabel, resultStatus));
 
   const wrapper = document.createElement('div');
   wrapper.appendChild(container);
 
   if (blockedAt) {
     wrapper.appendChild(pdWarningBox(`BLOCKED AT: ${blockedAt}`, 'error'));
+  } else if (!effectiveEdit) {
+    wrapper.appendChild(
+      pdWarningBox(
+        'User can view but cannot edit — see Field-Level Security / Object Permissions above for which grant is restricting Edit.',
+        'warning'
+      )
+    );
   }
 
   return wrapper;
@@ -241,13 +270,14 @@ function buildCopyDebugText(data) {
   const userId = pdGetInputValue('pd-user-id');
 
   const flsNotApplicable = data.fieldMeta && data.fieldMeta.permissionable === false;
-  const flsSummary = data.fls.length
-    ? data.fls
-        .map((f) => `${f.source} (${f.sourceName}): Read=${f.read}, Edit=${f.edit}`)
-        .join('; ')
-    : flsNotApplicable
-      ? 'not FLS-controlled (always accessible)'
-      : 'none found';
+  const flsSummary =
+    data.fieldChecked === false
+      ? 'not checked (no field specified)'
+      : data.fls.length
+        ? data.fls.map((f) => `${f.source} (${f.sourceName}): Read=${f.read}, Edit=${f.edit}`).join('; ')
+        : flsNotApplicable
+          ? 'not FLS-controlled (always accessible)'
+          : 'none found';
 
   const objectCrudSummary = data.objectCrud.length
     ? data.objectCrud
@@ -257,12 +287,47 @@ function buildCopyDebugText(data) {
         .join('; ')
     : 'none found';
 
+  const fieldClause = field ? `for field ${field} ` : '';
+
+  const sharingSummary = (data.sharingReasons || []).length
+    ? data.sharingReasons.map((r) => `${r.causeLabel} (${r.accessLevel})`).join('; ')
+    : 'none found (likely OWD-only, or blocked)';
+
   return (
-    `Permission Analysis for ${field} on ${object} record ${recordId} for user ${userId}:\n` +
+    `Permission Analysis ${fieldClause}on ${object} record ${recordId} for user ${userId}:\n` +
     `Record Access: Read=${data.recordAccess.hasRead}, Edit=${data.recordAccess.hasEdit}\n` +
+    `Sharing Reasons: ${sharingSummary}\n` +
     `FLS: ${flsSummary}\n` +
     `Object CRUD: ${objectCrudSummary}`
   );
+}
+
+/**
+ * Combines record-level, object-level, and (when a field was specified)
+ * field-level access into one effective read/edit verdict — so the summary
+ * badge and chain result never overstate access just because record-level
+ * sharing happens to be wide open while a field's FLS denies it.
+ */
+function computeEffectiveAccess(data) {
+  const recordRead = data.recordAccess.hasRead;
+  const recordEdit = data.recordAccess.hasEdit;
+  const objectRead = data.objectCrud.some((o) => o.read);
+  const objectEdit = data.objectCrud.some((o) => o.edit);
+
+  let fieldRead = true;
+  let fieldEdit = true;
+  if (data.fieldChecked !== false) {
+    const flsApplies = !(data.fieldMeta && data.fieldMeta.permissionable === false);
+    if (flsApplies) {
+      fieldRead = data.fls.some((f) => f.read);
+      fieldEdit = data.fls.some((f) => f.edit);
+    }
+  }
+
+  return {
+    effectiveRead: recordRead && objectRead && fieldRead,
+    effectiveEdit: recordEdit && objectEdit && fieldEdit
+  };
 }
 
 // ---------- sections ----------
@@ -275,15 +340,14 @@ function buildSummaryCard(data) {
   card.style.background = PD_COLORS.background;
   card.style.fontFamily = PD_FONT;
 
-  const hasRead = data.recordAccess.hasRead;
-  const hasEdit = data.recordAccess.hasEdit;
+  const { effectiveRead, effectiveEdit } = computeEffectiveAccess(data);
 
   let statusText;
   let statusType;
-  if (!hasRead) {
+  if (!effectiveRead) {
     statusText = '❌ ACCESS DENIED';
     statusType = 'error';
-  } else if (hasRead && !hasEdit) {
+  } else if (!effectiveEdit) {
     statusText = '⚠️ PARTIAL ACCESS';
     statusType = 'warning';
   } else {
@@ -296,8 +360,32 @@ function buildSummaryCard(data) {
   badge.style.padding = '6px 14px';
   card.appendChild(badge);
 
+  // Name WHERE access is restricted (record sharing, object permissions, or
+  // this specific field's FLS) instead of describing raw record-level
+  // MaxAccessLevel on its own — that alone can contradict the badge above it
+  // (e.g. "Edit access to this record" shown under an ACCESS DENIED badge,
+  // when the actual block is at the field level, not the record level).
+  let subtitleText;
+  if (!effectiveRead) {
+    const cause = !data.recordAccess.hasRead
+      ? 'record-level sharing'
+      : !data.objectCrud.some((o) => o.read)
+        ? 'object permissions'
+        : 'this field’s Field-Level Security';
+    subtitleText = `User cannot view this ${data.fieldChecked === false ? 'record' : 'field'} — Read is blocked by ${cause}`;
+  } else if (!effectiveEdit) {
+    const cause = !data.recordAccess.hasEdit
+      ? 'record-level sharing'
+      : !data.objectCrud.some((o) => o.edit)
+        ? 'object permissions'
+        : 'this field’s Field-Level Security';
+    subtitleText = `User can view but not edit — Edit is blocked by ${cause}`;
+  } else {
+    subtitleText = `User has ${data.recordAccess.maxAccessLevel || 'No'} access to this record`;
+  }
+
   const subtitle = document.createElement('div');
-  subtitle.textContent = `User has ${data.recordAccess.maxAccessLevel || 'No'} access to this record`;
+  subtitle.textContent = subtitleText;
   subtitle.style.marginTop = '8px';
   subtitle.style.fontSize = '12px';
   subtitle.style.color = PD_COLORS.text;
@@ -322,13 +410,28 @@ function buildRecordAccessSection(data) {
 
   section.appendChild(grid);
 
-  if (!hasRead) {
+  // Names WHICH sharing mechanism produced the record-level result above —
+  // UserRecordAccess already gives the final yes/no (it factors in OWD,
+  // role hierarchy, sharing rules, manual sharing, and Apex sharing all
+  // together), but not which one specifically. This shows that detail.
+  const sharingReasons = data.sharingReasons || [];
+  if (sharingReasons.length) {
+    const rows = sharingReasons.map((r) => [r.causeLabel, createBadge(r.accessLevel, 'info')]);
+    section.appendChild(createTable(['Sharing Mechanism', 'Access Level Granted'], rows));
+  } else if (hasRead) {
     section.appendChild(
       pdWarningBox(
-        'This user cannot see this record at all due to sharing rules, OWD, or role hierarchy.',
-        'error'
+        'No explicit sharing rows found for this user (checked their direct assignment and every group/role they belong to) — access is most likely coming from Organization-Wide Defaults (Public Read Only/Read Write) rather than an explicit grant.',
+        'info'
       )
     );
+  }
+
+  if (!hasRead) {
+    const cause = sharingReasons.length
+      ? `Found sharing row(s) — ${sharingReasons.map((r) => r.causeLabel).join(', ')} — but they don't grant enough access; check the Access Level(s) above against what's needed.`
+      : "No sharing rows grant this user access — likely blocked by Organization-Wide Defaults, with no compensating sharing rule, manual share, team membership, or role hierarchy grant.";
+    section.appendChild(pdWarningBox(`This user cannot see this record. ${cause}`, 'error'));
   }
 
   return section;
@@ -337,6 +440,13 @@ function buildRecordAccessSection(data) {
 function buildFlsSection(data) {
   const section = createSection('🛡️ Field-Level Security');
   const notPermissionable = data.fieldMeta && data.fieldMeta.permissionable === false;
+
+  if (data.fieldChecked === false) {
+    section.appendChild(
+      pdWarningBox('No field specified — showing object- and record-level access only.', 'info')
+    );
+    return section;
+  }
 
   if (!data.fls.length) {
     if (notPermissionable) {

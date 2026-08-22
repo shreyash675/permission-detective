@@ -202,7 +202,7 @@ function buildOverlayPanel() {
       <div id="pd-context" style="display:flex;flex-direction:column;gap:10px;">
         ${pdField('pd-object-api', 'Object')}
         ${pdField('pd-record-id', 'Record ID')}
-        ${pdField('pd-field-api', 'Field API Name')}
+        ${pdField('pd-field-api', 'Field API Name (optional)', 'Leave blank for object-level access only')}
         <label style="display:flex;flex-direction:column;gap:2px;font-size:12px;color:#444;position:relative;">
           <span>User ID or Name</span>
           <input id="pd-user-id" type="text" autocomplete="off"
@@ -464,10 +464,11 @@ function handleAnalyzeClick() {
 
   const resultsEl = document.getElementById('pd-results');
 
-  if (!objectApiName || !recordId || !fieldApiName || !userId) {
+  // Field API Name is optional — leaving it blank checks only object- and
+  // record-level access, which is a legitimate thing to want on its own.
+  if (!objectApiName || !recordId || !userId) {
     resultsEl.style.display = 'block';
-    resultsEl.innerHTML =
-      '<div style="color:#ba0517;">Please fill in Object, Record ID, Field API Name, and User ID.</div>';
+    resultsEl.innerHTML = '<div style="color:#ba0517;">Please fill in Object, Record ID, and User ID.</div>';
     return;
   }
 

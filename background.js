@@ -232,6 +232,94 @@ function escapeSoql(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
+/** Resolves the Share table name for a given object (standard vs. custom). */
+function getShareTableName(objectApiName) {
+  if (objectApiName.endsWith('__c')) {
+    return `${objectApiName.slice(0, -3)}__Share`;
+  }
+  return `${objectApiName}Share`;
+}
+
+/**
+ * Finds every Public Group / Queue / Role / Role-and-Subordinates the user
+ * is a member of — most real record-level sharing grants apply through role
+ * hierarchy or public group membership, not a direct manual share row keyed
+ * on the user's own Id, so attribution needs this to be complete.
+ */
+async function getUserGroupIds(instanceUrl, sessionId, userId) {
+  try {
+    const result = await querySalesforce(
+      instanceUrl,
+      sessionId,
+      `SELECT GroupId FROM GroupMember WHERE UserOrGroupId = '${userId}'`
+    );
+    return (result.records || []).map((r) => r.GroupId);
+  } catch (err) {
+    console.warn(`[Permission Detective] getUserGroupIds failed for ${userId}`, err);
+    return [];
+  }
+}
+
+const ROW_CAUSE_LABELS = {
+  Owner: 'Record Owner',
+  Rule: 'Sharing Rule',
+  Team: 'Account/Opportunity Team',
+  Manual: 'Manual Share',
+  ImplicitChild: 'Implicit (child of a shared parent record)',
+  ImplicitParent: 'Implicit (parent of a shared child record)'
+};
+
+/**
+ * Names WHICH sharing mechanism (a specific Sharing Rule, Manual Share, Apex
+ * Managed Sharing reason, ownership, team membership, etc.) is responsible
+ * for this user's record-level access. UserRecordAccess already tells us
+ * the final yes/no + max access level — Salesforce's own computation across
+ * OWD, role hierarchy, sharing rules, manual sharing, and Apex sharing — but
+ * not which specific mechanism produced that result. This queries the
+ * object's own {Object}Share table, scoped to the user's direct Id plus
+ * every group/role they belong to, to name it.
+ *
+ * A record with no matching Share rows and no Owner row usually means
+ * access came from Organization-Wide Defaults alone (Public Read Only/Read
+ * Write) rather than any explicit grant — OWD itself has no Share row,
+ * since it's the implicit org-wide baseline, not a per-record grant.
+ *
+ * Degrades gracefully (returns []) if the object has no queryable Share
+ * table (some standard objects don't expose one) rather than failing the
+ * whole analysis over this attribution enhancement.
+ *
+ * @returns {Promise<Array<{ accessLevel: string, cause: string, causeLabel: string }>>}
+ */
+async function getSharingReasons(instanceUrl, sessionId, objectApiName, recordId, userId) {
+  const shareTable = getShareTableName(objectApiName);
+  try {
+    const groupIds = await getUserGroupIds(instanceUrl, sessionId, userId);
+    const ids = [userId, ...groupIds].map((id) => `'${id}'`).join(', ');
+    const result = await querySalesforce(
+      instanceUrl,
+      sessionId,
+      `SELECT UserOrGroupId, AccessLevel, RowCause FROM ${shareTable} WHERE ParentId = '${recordId}' AND UserOrGroupId IN (${ids})`
+    );
+
+    const reasons = (result.records || []).map((r) => ({
+      accessLevel: r.AccessLevel,
+      cause: r.RowCause,
+      causeLabel: ROW_CAUSE_LABELS[r.RowCause] || `Apex Managed Sharing (${r.RowCause})`
+    }));
+
+    const seen = new Set();
+    return reasons.filter((r) => {
+      const key = `${r.cause}|${r.accessLevel}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  } catch (err) {
+    console.warn(`[Permission Detective] getSharingReasons failed for ${shareTable}`, err);
+    return [];
+  }
+}
+
 /**
  * Finds active users by name/username/email, for the User ID field's
  * search-as-you-type picker — so an admin can type "Jane" instead of
@@ -338,31 +426,27 @@ async function resolveFieldApiNameByLabel(instanceUrl, sessionId, objectApiName,
 
 /**
  * Runs the full permission analysis for a given user/record/field.
+ * `fieldApiName` is optional — pass '' or null to check only object- and
+ * record-level access, skipping the FieldPermissions query and Describe
+ * call entirely (both are meaningless without a specific field).
+ *
  * @returns {Promise<{
  *   recordAccess: { hasRead: boolean, hasEdit: boolean, hasDelete: boolean, hasTransfer: boolean, maxAccessLevel: string|null },
  *   fls: Array<{ field: string, read: boolean, edit: boolean, source: 'Profile'|'Permission Set', sourceName: string }>,
  *   objectCrud: Array<{ read: boolean, edit: boolean, delete: boolean, source: 'Profile'|'Permission Set', sourceName: string }>,
  *   userAssignments: Array<{ name: string, type: string, profileName: string|null }>,
- *   fieldMeta: { permissionable: boolean|null }
+ *   fieldMeta: { permissionable: boolean|null },
+ *   fieldChecked: boolean,
+ *   sharingReasons: Array<{ accessLevel: string, cause: string, causeLabel: string }>
  * }>}
  */
 async function analyzePermissions(instanceUrl, sessionId, userId, recordId, objectApiName, fieldApiName) {
+  const fieldChecked = !!fieldApiName;
+
   const userRecordAccessSoql = `
     SELECT RecordId, HasReadAccess, HasEditAccess, HasDeleteAccess, HasTransferAccess, MaxAccessLevel
     FROM UserRecordAccess
     WHERE UserId = '${userId}' AND RecordId = '${recordId}'
-  `;
-
-  // Parent.Name/.Label are selected for real Permission Sets; Parent.Profile.Name
-  // is selected separately because a Profile's underlying access is stored on a
-  // hidden, auto-generated PermissionSet whose own Name is a cryptic system
-  // string (e.g. "X00ex00000018ozT_128_09_43_34_1") — the real, human-readable
-  // Profile label lives on Parent.Profile.Name instead. See sourceNameOf().
-  const fieldPermissionsSoql = `
-    SELECT Field, PermissionsRead, PermissionsEdit, ParentId, Parent.Name, Parent.Label, Parent.Type, Parent.Profile.Name
-    FROM FieldPermissions
-    WHERE Field = '${objectApiName}.${fieldApiName}'
-    AND ParentId IN (SELECT PermissionSetId FROM PermissionSetAssignment WHERE AssigneeId = '${userId}')
   `;
 
   const objectPermissionsSoql = `
@@ -378,13 +462,41 @@ async function analyzePermissions(instanceUrl, sessionId, userId, recordId, obje
     WHERE AssigneeId = '${userId}'
   `;
 
-  const [recordAccessRes, fieldPermsRes, objectPermsRes, userAssignmentsRes, fieldMeta] = await Promise.all([
-    querySalesforce(instanceUrl, sessionId, userRecordAccessSoql),
-    querySalesforce(instanceUrl, sessionId, fieldPermissionsSoql),
-    querySalesforce(instanceUrl, sessionId, objectPermissionsSoql),
-    querySalesforce(instanceUrl, sessionId, userAssignmentsSoql),
-    describeField(instanceUrl, sessionId, objectApiName, fieldApiName)
-  ]);
+  const fieldPermsPromise = fieldChecked
+    ? // Parent.Name/.Label are selected for real Permission Sets; Parent.Profile.Name
+      // is selected separately because a Profile's underlying access is stored on a
+      // hidden, auto-generated PermissionSet whose own Name is a cryptic system
+      // string (e.g. "X00ex00000018ozT_128_09_43_34_1") — the real, human-readable
+      // Profile label lives on Parent.Profile.Name instead. See sourceNameOf().
+      // SobjectType must be filtered explicitly, not just Field = 'Object.Field' —
+      // Salesforce's FieldPermissions.Field comparison isn't reliably scoped to
+      // the object on its own and can cross-match same-named fields on other
+      // objects (e.g. a "Phone" field on Quote/Applicant/ServiceAppointment),
+      // silently attributing another object's field permission to this one.
+      querySalesforce(
+        instanceUrl,
+        sessionId,
+        `SELECT Field, PermissionsRead, PermissionsEdit, ParentId, Parent.Name, Parent.Label, Parent.Type, Parent.Profile.Name
+         FROM FieldPermissions
+         WHERE SobjectType = '${objectApiName}'
+         AND Field = '${objectApiName}.${fieldApiName}'
+         AND ParentId IN (SELECT PermissionSetId FROM PermissionSetAssignment WHERE AssigneeId = '${userId}')`
+      )
+    : Promise.resolve({ records: [] });
+
+  const fieldMetaPromise = fieldChecked
+    ? describeField(instanceUrl, sessionId, objectApiName, fieldApiName)
+    : Promise.resolve({ permissionable: null });
+
+  const [recordAccessRes, fieldPermsRes, objectPermsRes, userAssignmentsRes, fieldMeta, sharingReasons] =
+    await Promise.all([
+      querySalesforce(instanceUrl, sessionId, userRecordAccessSoql),
+      fieldPermsPromise,
+      querySalesforce(instanceUrl, sessionId, objectPermissionsSoql),
+      querySalesforce(instanceUrl, sessionId, userAssignmentsSoql),
+      fieldMetaPromise,
+      getSharingReasons(instanceUrl, sessionId, objectApiName, recordId, userId)
+    ]);
 
   const recordAccessRecord = recordAccessRes.records && recordAccessRes.records[0];
   const recordAccess = {
@@ -455,7 +567,7 @@ async function analyzePermissions(instanceUrl, sessionId, userId, recordId, obje
     (a) => `${a.name}|${a.type}|${a.profileName}`
   );
 
-  return { recordAccess, fls, objectCrud, userAssignments, fieldMeta };
+  return { recordAccess, fls, objectCrud, userAssignments, fieldMeta, fieldChecked, sharingReasons };
 }
 
 /**

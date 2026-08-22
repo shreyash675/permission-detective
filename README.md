@@ -18,8 +18,11 @@ responsible for it — in seconds, not tab-switches.
 ## Features
 
 - **On-page overlay** — opens right on the record you're already looking at, no context switching to Setup
-- **`UserRecordAccess` API integration** — record-level Read/Edit/Delete/Transfer access, straight from Salesforce's own evaluation engine
+- **`UserRecordAccess` API integration** — record-level Read/Edit/Delete/Transfer access, straight from Salesforce's own evaluation engine (which already factors in OWD, role hierarchy, sharing rules, manual sharing, and Apex sharing combined)
+- **Names the specific sharing mechanism** — queries the object's own Share table (`AccountShare`, `MyObject__Share`, etc.), scoped to the user's role/group memberships, to say *which* sharing rule, manual share, team, or Apex sharing reason is actually responsible — not just a generic "blocked by sharing"
 - **Visual permission chain** — traces User → Profile/Permission Sets → Object CRUD → Field-Level Security → Record Access, and shows exactly where the chain breaks
+- **Field-level-aware verdict** — the top-line result reflects combined record + object + field access, so it can never say "granted" when a field's FLS actually denies Edit
+- **Object-level-only mode** — Field API Name is optional; leave it blank to check just object- and record-level access without picking a specific field
 - **Color-coded results** — green/red/yellow badges for granted, denied, and partial access, at a glance
 - **Source attribution** — every grant or denial is tied to the specific Profile or Permission Set responsible for it, not just a yes/no
 - **Search-as-you-type user picker** — find the target user by name/username/email instead of hand-copying an 18-character Id
@@ -48,7 +51,7 @@ responsible for it — in seconds, not tab-switches.
 
 - **Manifest V3** (Chrome Extensions)
 - **Vanilla JavaScript** — no frameworks, no build step required to run it
-- **Salesforce REST API** (`UserRecordAccess`, `FieldPermissions`, `ObjectPermissions`, `PermissionSetAssignment`, sObject Describe)
+- **Salesforce REST API** (`UserRecordAccess`, `{Object}Share`, `GroupMember`, `FieldPermissions`, `ObjectPermissions`, `PermissionSetAssignment`, sObject Describe)
 - **SLDS (Salesforce Lightning Design System)** — for a UI that feels native to Salesforce
 
 ## Roadmap
@@ -95,21 +98,27 @@ permission-detective/
    the logged-in admin.
 4. On **Analyze**, the panel sends a `chrome.runtime.sendMessage` request to
    **background.js** with `action: 'analyzePermissions'`.
-5. **background.js** (the service worker) locates a working Salesforce session
-   cookie (`sid`) — trying every domain the org might have issued one on, since
-   Salesforce's Lightning UI domain and its REST API domain aren't always the
-   same one — then fires parallel authenticated REST calls to
-   `/services/data/v63.0/query`:
+5. **background.js** (the service worker) finds every plausible Salesforce
+   session cookie for the org (trying `my.salesforce.com`, `salesforce.com`,
+   and `lightning.force.com`, since a cookie can be genuinely present on one
+   domain yet still get rejected by the API — the extension tries each
+   candidate against the real API in turn rather than guessing), then fires
+   parallel authenticated REST calls to `/services/data/v63.0/query`:
    - `UserRecordAccess` → record-level Read/Edit/Delete/Transfer + MaxAccessLevel
-   - `FieldPermissions` (scoped to the user's assigned Permission Sets) → FLS Read/Edit per source
-   - `ObjectPermissions` (same scope) → object CRUD per source
+   - `{Object}Share` (e.g. `AccountShare`), scoped to the user's Id **and** every group/role/queue they belong to (via `GroupMember`) → names the specific sharing mechanism (`RowCause`: Owner, Rule, Team, Manual, Apex Managed Sharing, etc.) responsible for the record-level result above
+   - `FieldPermissions`, filtered by both `SobjectType` and `Field` (not `Field` alone — Salesforce's `Field = 'Object.Field'` comparison isn't reliably scoped to one object on its own) — skipped entirely if no field was specified
+   - `ObjectPermissions` (scoped to the user's assigned Permission Sets) → object CRUD per source
    - `PermissionSetAssignment` → the user's Profile + Permission Set names
-   - sObject **Describe** → whether the target field is FLS-controllable at all (required standard fields never have FieldPermissions rows, and shouldn't be reported as "denied")
+   - sObject **Describe** → whether the target field is FLS-controllable at all (required standard fields never have FieldPermissions rows, and shouldn't be reported as "denied") — skipped when no field was specified
 6. The service worker is used for all network calls specifically because
    content scripts run in the page's origin/CSP context and are more prone to
    CORS/CSP restrictions than the extension's own service worker.
-7. Results are rendered as a breakdown grouped by Profile / Permission Set,
-   plus a visual chain showing exactly where access is blocked, if it is.
+7. Results are rendered as a breakdown grouped by Profile / Permission Set /
+   sharing mechanism, plus a visual chain showing exactly where access is
+   blocked, if it is. The top-line verdict (Granted/Partial/Denied) is
+   computed once, combining record + object + field access, and both the
+   summary badge and the chain read from that same computation — so they
+   can never disagree with each other.
 
 ### Runtime permissions
 
@@ -145,9 +154,12 @@ The logged-in Salesforce user (whose session is used to make the API calls)
 needs:
 - **API Enabled** on their profile
 - Read access to `UserRecordAccess`, `FieldPermissions`, `ObjectPermissions`,
-  and `PermissionSetAssignment` (available to System Administrators by
+  `PermissionSetAssignment`, `GroupMember`, and the relevant object's own
+  Share table (e.g. `AccountShare`) — available to System Administrators by
   default; other profiles may need "View Setup and Configuration" or
-  equivalent).
+  equivalent. The sharing-mechanism attribution feature degrades gracefully
+  (just shows less detail) rather than failing if any of these aren't
+  accessible.
 
 ## Error handling
 
